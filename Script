@@ -1,0 +1,158 @@
+import csv
+import os
+import time
+from google.api_core.exceptions import GoogleAPICallError
+from google.cloud import discoveryengine_v1 as discoveryengine
+
+# --- CONFIGURATION ---
+PROJECT_ID = "YOUR_PROJECT_ID"
+LOCATION = "global"
+ENGINE_ID = "YOUR_ENGINE_ID"
+QUERY = '("Loan Broker" OR "Mortgage Broker" OR "Mortgage Loan Originator") "California" "NMLS"'
+
+CSV_PATH = "ca_nmls_leads.csv"
+LAST_TOKEN_PATH = "last_page_token.txt"
+
+# Per run settings — exactly what you asked for
+PAGES_PER_RUN = 10
+PAGE_SIZE = 10          # ← Changed back to 10 so it behaves like your original working script
+
+def load_existing_links(csv_path: str) -> set[str]:
+    if not os.path.exists(csv_path):
+        return set()
+    links = set()
+    with open(csv_path, "r", newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        if not reader.fieldnames:
+            return set()
+        for row in reader:
+            link = (row.get("Link") or "").strip()
+            if link:
+                links.add(link)
+    return links
+
+
+def load_last_page_token(path: str) -> str | None:
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            token = f.read().strip()
+            return token if token else None
+    return None
+
+
+def save_last_page_token(path: str, token: str | None):
+    if token:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(token)
+    else:
+        if os.path.exists(path):
+            os.remove(path)
+
+
+def append_to_csv(csv_path: str, rows: list[dict]):
+    if not rows:
+        return
+    file_exists = os.path.exists(csv_path)
+    fieldnames = ["Name/Title", "Link", "Snippet"]
+    with open(csv_path, "a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if not file_exists:
+            writer.writeheader()
+        writer.writerows(rows)
+
+
+def fetch_one_run(existing_links: set[str], start_page_token: str | None = None) -> tuple[list[dict], str | None]:
+    client = discoveryengine.SearchServiceClient()
+    serving_config = (
+        f"projects/{PROJECT_ID}/locations/{LOCATION}/collections/default_collection/"
+        f"engines/{ENGINE_ID}/servingConfigs/default_config"
+    )
+
+    all_new = []
+    page_token = start_page_token
+    pages_fetched = 0
+
+    content_search_spec = discoveryengine.SearchRequest.ContentSearchSpec(
+        snippet_spec=discoveryengine.SearchRequest.ContentSearchSpec.SnippetSpec(return_snippet=True)
+    )
+
+    try:
+        while pages_fetched < PAGES_PER_RUN:
+            print(f"Fetching page {pages_fetched + 1}/{PAGES_PER_RUN}...")
+
+            request = discoveryengine.SearchRequest(
+                serving_config=serving_config,
+                query=QUERY,
+                page_size=PAGE_SIZE,
+                page_token=page_token,
+                content_search_spec=content_search_spec,
+            )
+
+            response = client.search(request)
+
+            if not response.results:
+                print("   → No more results found.")
+                break
+
+            page_added = 0
+            page_seen = 0
+            for result in response.results:
+                data = result.document.derived_struct_data or {}
+                link = (data.get("link") or "").strip()
+                title = (data.get("title") or "").strip()
+
+                snippet = ""
+                snippets = data.get("snippets")
+                if isinstance(snippets, list) and snippets:
+                    snippet = (snippets[0].get("snippet") or "").strip()
+                elif data.get("htmlSnippet"):
+                    snippet = str(data.get("htmlSnippet")).strip()
+
+                page_seen += 1
+                if not link or link in existing_links:
+                    continue
+
+                existing_links.add(link)
+                all_new.append({"Name/Title": title, "Link": link, "Snippet": snippet})
+                page_added += 1
+
+            print(f"   Page had {page_seen} results → added {page_added} new.")
+
+            page_token = response.next_page_token
+            pages_fetched += 1
+
+            if not page_token:
+                print("   → No more pages available.")
+                break
+
+            time.sleep(0.8)
+
+    except GoogleAPICallError as e:
+        print(f"API error: {e}")
+        return [], page_token
+
+    return all_new, page_token
+
+
+def main():
+    existing_links = load_existing_links(CSV_PATH)
+    last_token = load_last_page_token(LAST_TOKEN_PATH)
+
+    print(f"Already saved: {len(existing_links)} unique links")
+    print(f"Resuming from previous page token: {'None (starting fresh)' if not last_token else 'Yes'}")
+
+    new_rows, next_token = fetch_one_run(existing_links, last_token)
+
+    print(f"New unique leads this run: {len(new_rows)}")
+    append_to_csv(CSV_PATH, new_rows)
+
+    save_last_page_token(LAST_TOKEN_PATH, next_token)
+
+    if next_token:
+        print(f"Next run will continue from page {PAGES_PER_RUN + 1} onward.")
+    else:
+        print("No more results to fetch — you’ve reached the end of this query.")
+
+
+if __name__ == "__main__":
+    main()
