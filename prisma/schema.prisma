@@ -14,8 +14,9 @@ model Search {
   leads     Lead[]
 }
 
-// A lead starts as a LinkedIn profile (no email), then gets enriched.
-// source tracks how we found it so we know what still needs work.
+// source tracks how a lead entered the system so we know what still needs enrichment.
+// Dedup is handled in application code — no DB-level unique on email/linkedinUrl
+// because both can be null at different stages of the pipeline.
 model Lead {
   id          String      @id @default(cuid())
   name        String?
@@ -30,20 +31,18 @@ model Lead {
   updatedAt   DateTime    @updatedAt
   searchId    String?
   search      Search?     @relation(fields: [searchId], references: [id])
-
-  @@unique([email, searchId])
 }
 
 enum LeadSource {
-  DISCOVERY_ENGINE // LinkedIn profile found via X-ray search
+  DISCOVERY_ENGINE // LinkedIn profile found via X-ray search — no email yet
   SCRAPER          // Email found via SERP bookmarklet
-  ENRICHED         // Email pattern-guessed + SMTP verified
+  ENRICHED         // Email pattern-guessed and SMTP verified
 }
 
 enum EmailStatus {
   UNVERIFIED
   VALID
   INVALID
-  CATCH_ALL // Server accepts anything — can't confirm
+  CATCH_ALL // Server accepts any address — can't confirm existence
   UNKNOWN   // SMTP blocked or timed out
 }

@@ -1,26 +1,24 @@
 // Runs a Boolean X-ray search via Google Discovery Engine and stores
-// the resulting LinkedIn profiles as leads (no email yet).
+// resulting LinkedIn profiles as leads (no email yet — enrichment comes later).
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { domainFromSnippet } from '@/lib/email-patterns';
 
 const PROJECT_ID = process.env.GCP_PROJECT_ID!;
-const LOCATION = process.env.GCP_LOCATION ?? 'global';
-const ENGINE_ID = process.env.GCP_ENGINE_ID!;
+const LOCATION   = process.env.GCP_LOCATION ?? 'global';
+const ENGINE_ID  = process.env.GCP_ENGINE_ID!;
 
-interface DiscoveryResult {
+interface RawResult {
   title?: string;
   link?: string;
-  snippets?: { snippet?: string }[];
-  htmlSnippet?: string;
+  snippet?: string;
 }
 
 async function runDiscoverySearch(
   query: string,
   pageToken?: string
-): Promise<{ results: DiscoveryResult[]; nextPageToken: string | null }> {
-  // Dynamic import keeps Google SDK out of the edge runtime
-  const { SearchServiceClient, protos } = await import('@google-cloud/discoveryengine');
+): Promise<{ results: RawResult[]; nextPageToken: string | null }> {
+  const { SearchServiceClient } = await import('@google-cloud/discoveryengine');
   const client = new SearchServiceClient();
 
   const servingConfig =
@@ -32,72 +30,71 @@ async function runDiscoverySearch(
     query,
     pageSize: 10,
     pageToken: pageToken ?? undefined,
-    contentSearchSpec: {
-      snippetSpec: { returnSnippet: true },
-    },
+    contentSearchSpec: { snippetSpec: { returnSnippet: true } },
   });
 
-  const results: DiscoveryResult[] = (response.results ?? []).map(r => {
+  const results: RawResult[] = (response.results ?? []).map(r => {
     const d = r.document?.derivedStructData?.fields ?? {};
-    const snippets = d.snippets?.listValue?.values?.map((v: { structValue?: { fields?: { snippet?: { stringValue?: string } } } }) => ({
-      snippet: v.structValue?.fields?.snippet?.stringValue ?? '',
-    }));
+    const snippetList = d.snippets?.listValue?.values ?? [];
+    const snippet =
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (snippetList[0] as any)?.structValue?.fields?.snippet?.stringValue ??
+      d.htmlSnippet?.stringValue ??
+      '';
     return {
-      title: d.title?.stringValue ?? '',
-      link: d.link?.stringValue ?? '',
-      snippets,
-      htmlSnippet: d.htmlSnippet?.stringValue ?? '',
+      title:   d.title?.stringValue ?? '',
+      link:    d.link?.stringValue ?? '',
+      snippet: snippet as string,
     };
   });
 
   return {
     results,
-    nextPageToken: (response as { nextPageToken?: string }).nextPageToken ?? null,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    nextPageToken: (response as any).nextPageToken ?? null,
   };
 }
 
 export async function POST(req: NextRequest) {
-  const { query, pageToken } = await req.json();
+  const { query, searchId: existingId, pageToken } = await req.json();
   if (!query) return NextResponse.json({ error: 'query required' }, { status: 400 });
 
-  // Create or reuse a search session for this query
-  const search = await prisma.search.upsert({
-    where: { id: pageToken ? 'reuse' : '' },
-    create: { query },
-    update: {},
-  }).catch(() => prisma.search.create({ data: { query } }));
+  // Reuse an existing search session for pagination, otherwise create a new one
+  const search = existingId
+    ? (await prisma.search.findUnique({ where: { id: existingId } })) ??
+      (await prisma.search.create({ data: { query } }))
+    : await prisma.search.create({ data: { query } });
 
   const { results, nextPageToken } = await runDiscoverySearch(query, pageToken);
 
   const leads = await Promise.all(
     results.map(async r => {
-      const snippet = r.snippets?.[0]?.snippet ?? r.htmlSnippet ?? '';
-      const domain = r.link ? null : domainFromSnippet(snippet);
+      if (!r.link) return null;
 
-      return prisma.lead.upsert({
-        where: {
-          email_searchId: {
-            // No email yet — use linkedinUrl as a stable dedup key via a raw query below
-            email: r.link ?? '',
-            searchId: search.id,
-          },
-        },
-        create: {
-          name: r.title ?? null,
-          linkedinUrl: r.link ?? null,
+      // Skip if this LinkedIn URL is already in this search session
+      const exists = await prisma.lead.findFirst({
+        where: { linkedinUrl: r.link, searchId: search.id },
+      });
+      if (exists) return exists;
+
+      const domain = domainFromSnippet(r.snippet ?? '');
+
+      return prisma.lead.create({
+        data: {
+          name:        r.title ?? null,
+          linkedinUrl: r.link,
           domain,
-          snippet,
-          source: 'DISCOVERY_ENGINE',
-          searchId: search.id,
+          snippet:     r.snippet ?? null,
+          source:      'DISCOVERY_ENGINE',
+          searchId:    search.id,
         },
-        update: {},
-      }).catch(() => null);
+      });
     })
   );
 
   return NextResponse.json({
-    searchId: search.id,
-    leads: leads.filter(Boolean),
+    searchId:      search.id,
+    leads:         leads.filter(Boolean),
     nextPageToken,
   });
 }
