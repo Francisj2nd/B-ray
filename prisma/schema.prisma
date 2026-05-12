@@ -1,0 +1,48 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Search {
+  id        String   @id @default(cuid())
+  query     String
+  createdAt DateTime @default(now())
+  leads     Lead[]
+}
+
+// source tracks how a lead entered the system so we know what still needs enrichment.
+// Dedup is handled in application code — no DB-level unique on email/linkedinUrl
+// because both can be null at different stages of the pipeline.
+model Lead {
+  id          String      @id @default(cuid())
+  name        String?
+  email       String?
+  linkedinUrl String?
+  company     String?
+  domain      String?
+  snippet     String?
+  source      LeadSource
+  emailStatus EmailStatus @default(UNVERIFIED)
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  searchId    String?
+  search      Search?     @relation(fields: [searchId], references: [id])
+}
+
+enum LeadSource {
+  DISCOVERY_ENGINE // LinkedIn profile found via X-ray search — no email yet
+  SCRAPER          // Email found via SERP bookmarklet
+  ENRICHED         // Email pattern-guessed and SMTP verified
+}
+
+enum EmailStatus {
+  UNVERIFIED
+  VALID
+  INVALID
+  CATCH_ALL // Server accepts any address — can't confirm existence
+  UNKNOWN   // SMTP blocked or timed out
+}
