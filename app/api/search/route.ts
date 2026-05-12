@@ -25,7 +25,9 @@ async function runDiscoverySearch(
     `projects/${PROJECT_ID}/locations/${LOCATION}/collections/default_collection/` +
     `engines/${ENGINE_ID}/servingConfigs/default_config`;
 
-  const [response] = await client.search({
+  // SDK returns [ISearchResult[], ISearchRequest | null, ISearchResponse]
+  // The first element is the page of results; the third has nextPageToken.
+  const [pageResults, , fullResponse] = await client.search({
     servingConfig,
     query,
     pageSize: 10,
@@ -33,25 +35,26 @@ async function runDiscoverySearch(
     contentSearchSpec: { snippetSpec: { returnSnippet: true } },
   });
 
-  const results: RawResult[] = (response.results ?? []).map(r => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const results: RawResult[] = (pageResults ?? []).map((r: any) => {
     const d = r.document?.derivedStructData?.fields ?? {};
     const snippetList = d.snippets?.listValue?.values ?? [];
-    const snippet =
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const snippet: string =
       (snippetList[0] as any)?.structValue?.fields?.snippet?.stringValue ??
       d.htmlSnippet?.stringValue ??
       '';
     return {
       title:   d.title?.stringValue ?? '',
       link:    d.link?.stringValue ?? '',
-      snippet: snippet as string,
+      snippet,
     };
   });
 
   return {
     results,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    nextPageToken: (response as any).nextPageToken ?? null,
+    nextPageToken: (fullResponse as any)?.nextPageToken ?? null,
   };
 }
 
