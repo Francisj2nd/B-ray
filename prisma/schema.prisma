@@ -1,0 +1,49 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Search {
+  id        String   @id @default(cuid())
+  query     String
+  createdAt DateTime @default(now())
+  leads     Lead[]
+}
+
+// A lead starts as a LinkedIn profile (no email), then gets enriched.
+// source tracks how we found it so we know what still needs work.
+model Lead {
+  id          String      @id @default(cuid())
+  name        String?
+  email       String?
+  linkedinUrl String?
+  company     String?
+  domain      String?
+  snippet     String?
+  source      LeadSource
+  emailStatus EmailStatus @default(UNVERIFIED)
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  searchId    String?
+  search      Search?     @relation(fields: [searchId], references: [id])
+
+  @@unique([email, searchId])
+}
+
+enum LeadSource {
+  DISCOVERY_ENGINE // LinkedIn profile found via X-ray search
+  SCRAPER          // Email found via SERP bookmarklet
+  ENRICHED         // Email pattern-guessed + SMTP verified
+}
+
+enum EmailStatus {
+  UNVERIFIED
+  VALID
+  INVALID
+  CATCH_ALL // Server accepts anything — can't confirm
+  UNKNOWN   // SMTP blocked or timed out
+}
